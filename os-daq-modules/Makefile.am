@@ -26,6 +26,12 @@ endif
     libdaq_static_modules_la_CFLAGS += -DBUILD_AFPACKET_MODULE
 endif
 
+pkglib_LTLIBRARIES += daq_rswitch_offload.la
+daq_rswitch_offload_la_SOURCES = daq_rswitch_offload.c
+daq_rswitch_offload_la_CFLAGS = -DBUILDING_SO
+daq_rswitch_offload_la_LDFLAGS = -module -export-dynamic -avoid-version -shared @XCCFLAGS@
+daq_rswitch_offload_la_LIBADD = $(top_builddir)/sfbpf/libsfbpf.la
+
 if BUILD_PCAP_MODULE
 if BUILD_SHARED_MODULES
     pkglib_LTLIBRARIES += daq_pcap.la
