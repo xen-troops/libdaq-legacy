@@ -71,6 +71,7 @@
 #define IDXMAP_SIZE	(1024)
 #define RTNL_SUPPRESS_NLMSG_ERROR_NLERR	(4)
 #define RTNL_SUPPRESS_NLMSG_DONE_NLERR (2)
+#define MAX_PREFS (1024)
 
 #ifndef __aligned
 #define __aligned(x)		__attribute__((aligned(x)))
@@ -84,12 +85,6 @@
 	(type *)((char *)(ptr) - (char *) &((type *)0)->member)
 #endif
 
-#define list_for_each_entry_safe(pos, n, head, member)			\
-	for (pos = list_first_entry(head, __typeof__(*pos), member),	\
-		n = list_next_entry(pos, member);			\
-		 &pos->member != (head);					\
-		 pos = n, n = list_next_entry(n, member))
-
 #define list_entry(ptr, type, member) \
 	container_of(ptr, type, member)
 
@@ -98,6 +93,17 @@
 
 #define list_next_entry(pos, member) \
 	list_entry((pos)->member.next, __typeof__(*(pos)), member)
+
+#define list_for_each_entry(pos, head, member)				\
+	for (pos = list_first_entry(head, __typeof__(*pos), member);	\
+	     &pos->member != (head);					\
+	     pos = list_next_entry(pos, member))
+
+#define list_for_each_entry_safe(pos, n, head, member)			\
+	for (pos = list_first_entry(head, __typeof__(*pos), member),	\
+		n = list_next_entry(pos, member);			\
+		 &pos->member != (head);					\
+		 pos = n, n = list_next_entry(n, member))
 
 #define NLMSG_TAIL(nmsg) \
 	((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
@@ -135,6 +141,20 @@ struct __attribute__((__packed__)) ip_v4_hdr {
 	uint32_t ip_dst;  /* dest IP */
 };
 
+struct list_head;
+
+struct list_head {
+	struct list_head *next, *prev;
+};
+
+struct blacklist_data {
+	uint32_t dst_ip;
+	uint32_t src_ip;
+	uint32_t pref;
+	uint8_t proto;
+	struct list_head list;
+};
+
 struct rswitch_impl {
 	int passive;
 
@@ -153,6 +173,7 @@ struct rswitch_impl {
 	int buffer_size;
 	u_char *user_data;
 	uint32_t netmask;
+	struct list_head blacklist;
 };
 
 struct rtnl_handle {
@@ -164,10 +185,6 @@ struct rtnl_handle {
 	int			proto;
 	FILE		*dump_fp;
 	int			flags;
-};
-
-struct list_head {
-	struct list_head *next, *prev;
 };
 
 struct hlist_node {
@@ -203,11 +220,16 @@ struct tc_gact {
 	int			refcnt;
 	int			bindcnt
 };
+struct filter_prefs {
+	int num;
+	uint32_t prefs[MAX_PREFS];
+};
 
 static struct hlist_head idx_head[IDXMAP_SIZE];
 static struct hlist_head name_head[IDXMAP_SIZE];
 static int rcvbuf = 1024 * 1024;
 static struct rtnl_handle rth;
+static struct filter_prefs prefs_before, prefs_after;
 
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {
@@ -1309,6 +1331,7 @@ static int rswitch_daq_initialize(
 	impl->snaplen = cfg->snaplen;
 	impl->promisc_flag = (cfg->flags & DAQ_CFG_PROMISC);
 	impl->timeout = cfg->timeout;
+	INIT_LIST_HEAD(&impl->blacklist);
 
 	if (pcap_daq_open(impl) != DAQ_SUCCESS) {
 		snprintf(errBuf, errMax, "%s", impl->error);
@@ -1329,8 +1352,36 @@ static int rswitch_daq_initialize(
 	return DAQ_SUCCESS;
 }
 
-static void rswitch_daq_shutdown(void* handle)
+void remove_drop_action(struct rswitch_impl *context, uint32_t pref)
 {
+	struct {
+		struct nlmsghdr	n;
+		struct tcmsg	t;
+		char			buf[MAX_MSG];
+	} req = {
+		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
+		.n.nlmsg_flags = NLM_F_REQUEST,
+		.n.nlmsg_type = RTM_DELTFILTER,
+		.t.tcm_family = AF_UNSPEC,
+		.t.tcm_parent = 0xfffffff2,
+	};
+
+	req.t.tcm_info = ((pref) << 16);
+	req.t.tcm_ifindex = ll_name_to_index(context->device);
+
+	if (rtnl_talk(&rth, &req.n, NULL) < 0) {
+		fprintf(stderr, "We have an error talking to the kernel\n");
+		return;
+	}
+}
+
+static void rswitch_daq_shutdown(void *handle)
+{
+	struct rswitch_impl *context = (struct rswitch_impl *)handle;
+	struct blacklist_data *pos, *tmp;
+
+	list_for_each_entry_safe(pos, tmp, &context->blacklist, list)
+		remove_drop_action(context, pos->pref);
 }
 
 static void add_drop_action(struct nlmsghdr	*n)
@@ -1351,6 +1402,147 @@ static void add_drop_action(struct nlmsghdr	*n)
 	addattr_nest_end(n, u32_act_tail);
 }
 
+static bool is_already_blacklisted(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *impl)
+{
+	struct blacklist_data *pos;
+
+	list_for_each_entry(pos, &impl->blacklist, list) {
+		if (pos->dst_ip == ip_hdr->ip_dst &&
+		    pos->src_ip == ip_hdr->ip_src &&
+			pos->proto == ip_hdr->ip_proto) {
+				return true;
+			}
+	}
+
+	return false;
+}
+
+int rtnl_dump_request_n(struct rtnl_handle *rth, struct nlmsghdr *n)
+{
+	struct sockaddr_nl nladdr = { .nl_family = AF_NETLINK };
+	struct iovec iov = {
+		.iov_base = n,
+		.iov_len = n->nlmsg_len
+	};
+	struct msghdr msg = {
+		.msg_name = &nladdr,
+		.msg_namelen = sizeof(nladdr),
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+	};
+
+	n->nlmsg_flags = NLM_F_DUMP|NLM_F_REQUEST;
+	n->nlmsg_pid = 0;
+	n->nlmsg_seq = rth->dump = ++rth->seq;
+
+	return sendmsg(rth->fd, &msg, 0);
+}
+
+static bool is_pref_present(struct filter_prefs *prefs, uint32_t new_pref)
+{
+	int i;
+
+	if (!prefs || !prefs->num)
+		return false;
+
+	for (i = 0; i < prefs->num; i++) {
+		if (prefs->prefs[i] == new_pref)
+			return true;
+	}
+
+	return false;
+}
+
+int save_pref_callback(struct nlmsghdr *n, struct filter_prefs *prefs)
+{
+	struct tcmsg *t = NLMSG_DATA(n);
+	uint32_t new_pref = TC_H_MAJ(t->tcm_info) >> 16;
+
+	if (is_pref_present(prefs, new_pref))
+		return 0;
+
+	if (prefs->num >= MAX_PREFS - 1)
+		return -1;
+
+	prefs->prefs[prefs->num] = new_pref;
+	prefs->num++;
+
+	return 0;
+}
+
+static int save_pref_before(struct nlmsghdr *n, void *arg)
+{
+	return save_pref_callback(n, &prefs_before);
+}
+
+static int save_pref_after(struct nlmsghdr *n, void *arg)
+{
+	return save_pref_callback(n, &prefs_after);
+}
+
+static int get_new_pref(void)
+{
+	int i, j;
+
+	for (i = 0; i < prefs_after.num; i++) {
+		for (j = 0; j < prefs_before.num; j++) {
+			if (prefs_after.prefs[i] == prefs_before.prefs[j]) {
+				prefs_after.prefs[i] = 0;
+				break;
+			}
+		}
+	}
+
+	for (i = 0; i < prefs_after.num; i++) {
+		if (prefs_after.prefs[i])
+			return prefs_after.prefs[i];
+	}
+
+	return -1;
+}
+
+static int get_filters(struct rswitch_impl *impl, bool before)
+{
+	struct {
+		struct nlmsghdr	n;
+		struct tcmsg		t;
+		char			buf[MAX_MSG];
+	} req = {
+		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
+		.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ECHO,
+		.n.nlmsg_type = RTM_GETTFILTER,
+		.t.tcm_parent = 0xfffffff2,
+		.t.tcm_family = AF_UNSPEC,
+	};
+
+	req.t.tcm_ifindex = ll_name_to_index(impl->device);
+	if (req.t.tcm_ifindex == 0) {
+		fprintf(stderr, "Cannot find device \"%s\"\n", impl->device);
+		return -1;
+	}
+
+	req.t.tcm_info = 0;
+
+	if (rtnl_dump_request_n(&rth, &req.n) < 0) {
+		fprintf(stderr, "Cannot send dump request\n");
+		return -1;
+	}
+
+	if (before) {
+		if (rtnl_dump_filter(&rth, save_pref_before, stdout) < 0) {
+			fprintf(stderr, "Dump terminated\n");
+			return -1;
+		}
+	} else {
+		if (rtnl_dump_filter(&rth, save_pref_after, stdout) < 0) {
+			fprintf(stderr, "Dump terminated\n");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *impl)
 {
 	struct rtattr *tail;
@@ -1369,12 +1561,31 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 		struct tc_u32_key keys[128];
 	} sel = {};
 	uint32_t flags = TCA_CLS_FLAGS_SKIP_SW;
+	struct blacklist_data *blacklist_entry;
+
+	prefs_after.num = 0;
+	prefs_before.num = 0;
+
+	if (is_already_blacklisted(ip_hdr, impl))
+		return;
 
 	ll_init_map(&rth);
+
+	if (get_filters(impl, true)) {
+		fprintf(stderr, "Failed to get filter prefs before adding new filter\n");
+		return;
+	}
+
+	blacklist_entry = calloc(1, sizeof(*blacklist_entry));
+	if (!blacklist_entry) {
+		fprintf(stderr, "Failed to allocate memory for blacklist entry\n");
+		return;
+	}
 
 	req.t.tcm_ifindex = ll_name_to_index(impl->device);
 	if (req.t.tcm_ifindex == 0) {
 		fprintf(stderr, "Cannot find device \"%s\"\n", impl->device);
+		free(blacklist_entry);
 		return;
 	}
 	req.t.tcm_parent = 0xffff0000;
@@ -1399,8 +1610,21 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 
 	if (rtnl_talk(&rth, &req.n, NULL) < 0) {
 		fprintf(stderr, "We have an error talking to the kernel\n");
+		free(blacklist_entry);
 		return;
 	}
+
+	if (get_filters(impl, false)) {
+		fprintf(stderr, "Failed to get filter prefs after adding new filter\n");
+		free(blacklist_entry);
+		return;
+	}
+
+	blacklist_entry->pref = get_new_pref();
+	blacklist_entry->dst_ip = ip_hdr->ip_dst;
+	blacklist_entry->src_ip = ip_hdr->ip_src;
+	blacklist_entry->proto = ip_hdr->ip_proto;
+	list_add(&blacklist_entry->list, &impl->blacklist);
 }
 
 static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, const u_char *data)
