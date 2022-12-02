@@ -94,15 +94,15 @@
 #define list_next_entry(pos, member) \
 	list_entry((pos)->member.next, __typeof__(*(pos)), member)
 
-#define list_for_each_entry(pos, head, member)				\
+#define list_for_each_entry(pos, head, member)						\
 	for (pos = list_first_entry(head, __typeof__(*pos), member);	\
-	     &pos->member != (head);					\
-	     pos = list_next_entry(pos, member))
+		 &pos->member != (head);									\
+		 pos = list_next_entry(pos, member))
 
-#define list_for_each_entry_safe(pos, n, head, member)			\
+#define list_for_each_entry_safe(pos, n, head, member)				\
 	for (pos = list_first_entry(head, __typeof__(*pos), member),	\
-		n = list_next_entry(pos, member);			\
-		 &pos->member != (head);					\
+		n = list_next_entry(pos, member);							\
+		 &pos->member != (head);									\
 		 pos = n, n = list_next_entry(n, member))
 
 #define NLMSG_TAIL(nmsg) \
@@ -155,9 +155,7 @@ struct blacklist_data {
 	struct list_head list;
 };
 
-struct rswitch_impl {
-	int passive;
-
+struct rswitch_context {
 	unsigned snaplen;
 	char error[DAQ_ERRBUF_SIZE];
 
@@ -385,7 +383,7 @@ static int __rtnl_talk_iov(struct rtnl_handle *rtnl, struct iovec *iov,
 
 	status = sendmsg(rtnl->fd, &msg, 0);
 	if (status < 0) {
-		perror("Cannot talk to rtnetlink");
+		fprintf(stderr, "Cannot talk to rtnetlink\n");
 		return -1;
 	}
 
@@ -527,19 +525,19 @@ static int rtnl_open_byproto(struct rtnl_handle *rth, unsigned int subscriptions
 	rth->proto = protocol;
 	rth->fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, protocol);
 	if (rth->fd < 0) {
-		perror("Cannot open netlink socket");
+		fprintf(stderr, "Cannot open netlink socket\n");
 		return -1;
 	}
 
 	if (setsockopt(rth->fd, SOL_SOCKET, SO_SNDBUF,
 			   &sndbuf, sizeof(sndbuf)) < 0) {
-		perror("SO_SNDBUF");
+		fprintf(stderr, "SO_SNDBUF\n");
 		goto err;
 	}
 
 	if (setsockopt(rth->fd, SOL_SOCKET, SO_RCVBUF,
 			   &rcvbuf, sizeof(rcvbuf)) < 0) {
-		perror("SO_RCVBUF");
+		fprintf(stderr, "SO_RCVBUF\n");
 		goto err;
 	}
 
@@ -553,13 +551,13 @@ static int rtnl_open_byproto(struct rtnl_handle *rth, unsigned int subscriptions
 
 	if (bind(rth->fd, (struct sockaddr *)&rth->local,
 		 sizeof(rth->local)) < 0) {
-		perror("Cannot bind netlink socket");
+		fprintf(stderr, "Cannot bind netlink socket\n");
 		goto err;
 	}
 	addr_len = sizeof(rth->local);
 	if (getsockname(rth->fd, (struct sockaddr *)&rth->local,
 			&addr_len) < 0) {
-		perror("Cannot getsockname");
+		fprintf(stderr, "Cannot getsockname\n");
 		goto err;
 	}
 	if (addr_len != sizeof(rth->local)) {
@@ -628,8 +626,6 @@ static int pack_key(struct tc_u32_sel *sel, uint32_t key, uint32_t mask,
 static int pack_key32(struct tc_u32_sel *sel, uint32_t key, uint32_t mask,
 			  int off, int offmask)
 {
-	//key = htonl(key);
-	//mask = htonl(mask);
 	return pack_key(sel, key, mask, off, offmask);
 }
 
@@ -656,7 +652,7 @@ static int pack_key8(struct tc_u32_sel *sel, uint32_t key, uint32_t mask, int of
 	return pack_key(sel, key, mask, off, offmask);
 }
 
-int addattr_l(struct nlmsghdr *n, int maxlen, int type, const void *data,
+static int addattr_l(struct nlmsghdr *n, int maxlen, int type, const void *data,
 		  int alen)
 {
 	int len = RTA_LENGTH(alen);
@@ -677,7 +673,7 @@ int addattr_l(struct nlmsghdr *n, int maxlen, int type, const void *data,
 	return 0;
 }
 
-int rtnl_linkdump_req_filter(struct rtnl_handle *rth, int family,
+static int rtnl_linkdump_req_filter(struct rtnl_handle *rth, int family,
 				__u32 filt_mask)
 {
 	struct {
@@ -700,12 +696,12 @@ int rtnl_linkdump_req_filter(struct rtnl_handle *rth, int family,
 	return send(rth->fd, &req, sizeof(req), 0);
 }
 
-int rtnl_linkdump_req(struct rtnl_handle *rth, int family)
+static int rtnl_linkdump_req(struct rtnl_handle *rth, int family)
 {
 	return rtnl_linkdump_req_filter(rth, family, RTEXT_FILTER_VF);
 }
 
-int nl_dump_ext_ack_done(const struct nlmsghdr *nlh, int error)
+static int nl_dump_ext_ack_done(const struct nlmsghdr *nlh, int error)
 {
 	return 0;
 }
@@ -735,11 +731,10 @@ static int rtnl_dump_done(struct nlmsghdr *h,
 		case EOPNOTSUPP:
 			return -1;
 		case EMSGSIZE:
-			fprintf(stderr,
-				"Error: Buffer too small for object.\n");
+			fprintf(stderr, "Error: Buffer too small for object.\n");
 			break;
 		default:
-			perror("RTNETLINK answers");
+			fprintf(stderr, "RTNETLINK answers\n");
 		}
 		return len;
 	}
@@ -770,7 +765,7 @@ static int rtnl_dump_error(const struct rtnl_handle *rth,
 			return 0;
 
 		if (!(rth->flags & RTNL_HANDLE_F_SUPPRESS_NLERR))
-			perror("RTNETLINK answers");
+			fprintf(stderr, "RTNETLINK answers\n");
 	}
 
 	return -1;
@@ -858,8 +853,7 @@ skip_it:
 
 		if (found_done) {
 			if (dump_intr)
-				fprintf(stderr,
-					"Dump was interrupted and may be inconsistent.\n");
+				fprintf(stderr, "Dump was interrupted and may be inconsistent.\n");
 			return 0;
 		}
 
@@ -874,7 +868,7 @@ skip_it:
 	}
 }
 
-int rtnl_dump_filter_nc(struct rtnl_handle *rth,
+static int rtnl_dump_filter_nc(struct rtnl_handle *rth,
 			rtnl_filter_t filter,
 			void *arg1, __u16 nc_flags)
 {
@@ -1119,7 +1113,7 @@ static void ll_init_map(struct rtnl_handle *rth)
 		return;
 
 	if (rtnl_linkdump_req(rth, AF_UNSPEC) < 0) {
-		perror("Cannot send dump request");
+		fprintf(stderr, "Cannot send dump request\n");
 		exit(1);
 	}
 
@@ -1175,7 +1169,7 @@ static int ll_link_get(const char *name, int index)
 	struct {
 		struct nlmsghdr		n;
 		struct ifinfomsg	ifm;
-		char			buf[1024];
+		char				buf[1024];
 	} req = {
 		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg)),
 		.n.nlmsg_flags = NLM_F_REQUEST,
@@ -1238,7 +1232,7 @@ static unsigned int ll_idx_a2n(const char *name)
 	return idx;
 }
 
-unsigned ll_name_to_index(const char *name)
+static unsigned ll_name_to_index(const char *name)
 {
 	const struct ll_cache *im;
 	unsigned idx;
@@ -1258,7 +1252,7 @@ unsigned ll_name_to_index(const char *name)
 	return idx;
 }
 
-static int pcap_daq_open(struct rswitch_impl *context)
+static int pcap_daq_open(struct rswitch_context *context)
 {
 	uint32_t localnet, netmask;
 	uint32_t defaultnet = 0xFFFFFF00;
@@ -1269,8 +1263,7 @@ static int pcap_daq_open(struct rswitch_impl *context)
 	if (context->handle)
 		return DAQ_SUCCESS;
 
-	if (context->device)
-	{
+	if (context->device) {
 #ifndef PCAP_OLDSTYLE
 		context->handle = pcap_create(context->device, context->error);
 		if (!context->handle)
@@ -1313,46 +1306,46 @@ fail:
 static int rswitch_daq_initialize(
 	const DAQ_Config_t* cfg, void** handle, char* errBuf, size_t errMax)
 {
-	struct rswitch_impl* impl = calloc(1, sizeof(*impl));
+	struct rswitch_context* context = calloc(1, sizeof(*context));
 
-	if (!impl) {
+	if (!context) {
 		snprintf(errBuf, errMax, "%s: failed to allocate the R-Switch context!",
 			__func__);
 		return DAQ_ERROR_NOMEM;
 	}
 
-	impl->device = strdup(cfg->name);
-	if (!impl->device) {
+	context->device = strdup(cfg->name);
+	if (!context->device) {
 		snprintf(errBuf, errMax, "%s: Couldn't allocate memory for the device string!", __func__);
-		free(impl);
+		free(context);
 		return DAQ_ERROR_NOMEM;
 	}
 
-	impl->snaplen = cfg->snaplen;
-	impl->promisc_flag = (cfg->flags & DAQ_CFG_PROMISC);
-	impl->timeout = cfg->timeout;
-	INIT_LIST_HEAD(&impl->blacklist);
+	context->snaplen = cfg->snaplen;
+	context->promisc_flag = (cfg->flags & DAQ_CFG_PROMISC);
+	context->timeout = cfg->timeout;
+	INIT_LIST_HEAD(&context->blacklist);
 
-	if (pcap_daq_open(impl) != DAQ_SUCCESS) {
-		snprintf(errBuf, errMax, "%s", impl->error);
-		free(impl);
+	if (pcap_daq_open(context) != DAQ_SUCCESS) {
+		snprintf(errBuf, errMax, "%s", context->error);
+		free(context);
 		return DAQ_ERROR;
 	}
 
 	if (rtnl_open(&rth, 0) < 0) {
 		fprintf(stderr, "Cannot open rtnetlink\n");
-		free(impl);
+		free(context);
 		return DAQ_ERROR;
 	}
 
-	impl->state = DAQ_STATE_INITIALIZED;
+	context->state = DAQ_STATE_INITIALIZED;
 
-	*handle = impl;
+	*handle = context;
 
 	return DAQ_SUCCESS;
 }
 
-void remove_drop_action(struct rswitch_impl *context, uint32_t pref)
+static void remove_drop_action(struct rswitch_context *context, uint32_t pref)
 {
 	struct {
 		struct nlmsghdr	n;
@@ -1377,7 +1370,7 @@ void remove_drop_action(struct rswitch_impl *context, uint32_t pref)
 
 static void rswitch_daq_shutdown(void *handle)
 {
-	struct rswitch_impl *context = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 	struct blacklist_data *pos, *tmp;
 
 	list_for_each_entry_safe(pos, tmp, &context->blacklist, list)
@@ -1402,13 +1395,13 @@ static void add_drop_action(struct nlmsghdr	*n)
 	addattr_nest_end(n, u32_act_tail);
 }
 
-static bool is_already_blacklisted(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *impl)
+static bool is_already_blacklisted(struct ip_v4_hdr *ip_hdr, struct rswitch_context *context)
 {
 	struct blacklist_data *pos;
 
-	list_for_each_entry(pos, &impl->blacklist, list) {
+	list_for_each_entry(pos, &context->blacklist, list) {
 		if (pos->dst_ip == ip_hdr->ip_dst &&
-		    pos->src_ip == ip_hdr->ip_src &&
+			pos->src_ip == ip_hdr->ip_src &&
 			pos->proto == ip_hdr->ip_proto) {
 				return true;
 			}
@@ -1417,7 +1410,7 @@ static bool is_already_blacklisted(struct ip_v4_hdr *ip_hdr, struct rswitch_impl
 	return false;
 }
 
-int rtnl_dump_request_n(struct rtnl_handle *rth, struct nlmsghdr *n)
+static int rtnl_dump_request_n(struct rtnl_handle *rth, struct nlmsghdr *n)
 {
 	struct sockaddr_nl nladdr = { .nl_family = AF_NETLINK };
 	struct iovec iov = {
@@ -1453,7 +1446,7 @@ static bool is_pref_present(struct filter_prefs *prefs, uint32_t new_pref)
 	return false;
 }
 
-int save_pref_callback(struct nlmsghdr *n, struct filter_prefs *prefs)
+static int save_pref_callback(struct nlmsghdr *n, struct filter_prefs *prefs)
 {
 	struct tcmsg *t = NLMSG_DATA(n);
 	uint32_t new_pref = TC_H_MAJ(t->tcm_info) >> 16;
@@ -1501,11 +1494,11 @@ static int get_new_pref(void)
 	return -1;
 }
 
-static int get_filters(struct rswitch_impl *impl, bool before)
+static int get_filters(struct rswitch_context *context, bool before)
 {
 	struct {
 		struct nlmsghdr	n;
-		struct tcmsg		t;
+		struct tcmsg	t;
 		char			buf[MAX_MSG];
 	} req = {
 		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
@@ -1515,9 +1508,9 @@ static int get_filters(struct rswitch_impl *impl, bool before)
 		.t.tcm_family = AF_UNSPEC,
 	};
 
-	req.t.tcm_ifindex = ll_name_to_index(impl->device);
+	req.t.tcm_ifindex = ll_name_to_index(context->device);
 	if (req.t.tcm_ifindex == 0) {
-		fprintf(stderr, "Cannot find device \"%s\"\n", impl->device);
+		fprintf(stderr, "Cannot find device \"%s\"\n", context->device);
 		return -1;
 	}
 
@@ -1543,7 +1536,7 @@ static int get_filters(struct rswitch_impl *impl, bool before)
 	return 0;
 }
 
-static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *impl)
+static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *context)
 {
 	struct rtattr *tail;
 	struct {
@@ -1566,12 +1559,12 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 	prefs_after.num = 0;
 	prefs_before.num = 0;
 
-	if (is_already_blacklisted(ip_hdr, impl))
+	if (is_already_blacklisted(ip_hdr, context))
 		return;
 
 	ll_init_map(&rth);
 
-	if (get_filters(impl, true)) {
+	if (get_filters(context, true)) {
 		fprintf(stderr, "Failed to get filter prefs before adding new filter\n");
 		return;
 	}
@@ -1582,9 +1575,9 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 		return;
 	}
 
-	req.t.tcm_ifindex = ll_name_to_index(impl->device);
+	req.t.tcm_ifindex = ll_name_to_index(context->device);
 	if (req.t.tcm_ifindex == 0) {
-		fprintf(stderr, "Cannot find device \"%s\"\n", impl->device);
+		fprintf(stderr, "Cannot find device \"%s\"\n", context->device);
 		free(blacklist_entry);
 		return;
 	}
@@ -1614,7 +1607,7 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 		return;
 	}
 
-	if (get_filters(impl, false)) {
+	if (get_filters(context, false)) {
 		fprintf(stderr, "Failed to get filter prefs after adding new filter\n");
 		free(blacklist_entry);
 		return;
@@ -1624,12 +1617,12 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_impl *imp
 	blacklist_entry->dst_ip = ip_hdr->ip_dst;
 	blacklist_entry->src_ip = ip_hdr->ip_src;
 	blacklist_entry->proto = ip_hdr->ip_proto;
-	list_add(&blacklist_entry->list, &impl->blacklist);
+	list_add(&blacklist_entry->list, &context->blacklist);
 }
 
 static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, const u_char *data)
 {
-	struct rswitch_impl *context = (struct rswitch_impl *) user;
+	struct rswitch_context *context = (struct rswitch_context *) user;
 	DAQ_PktHdr_t hdr = { 0 };
 	DAQ_Verdict verdict;
 	struct ip_v4_hdr *ip_hdr;
@@ -1661,7 +1654,7 @@ static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, cons
 static int rswitch_daq_acquire(
 	void* handle, int cnt, DAQ_Analysis_Func_t callback, DAQ_Meta_Func_t metaback, void* user)
 {
-	struct rswitch_impl *context = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 	int ret;
 
 	context->analysis_func = callback;
@@ -1697,12 +1690,12 @@ static int rswitch_daq_set_filter(void* handle, const char* filter)
 
 static int rswitch_daq_start(void* handle)
 {
-	struct rswitch_impl *impl = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	if (pcap_daq_open(impl) != DAQ_SUCCESS)
+	if (pcap_daq_open(context) != DAQ_SUCCESS)
 		return DAQ_ERROR;
 
-	impl->state = DAQ_STATE_STARTED;
+	context->state = DAQ_STATE_STARTED;
 	return DAQ_SUCCESS;
 }
 
@@ -1713,17 +1706,17 @@ static int rswitch_daq_breakloop(void* handle)
 
 static int rswitch_daq_stop(void* handle)
 {
-	struct rswitch_impl *impl = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	impl->state = DAQ_STATE_STOPPED;
+	context->state = DAQ_STATE_STOPPED;
 	return DAQ_SUCCESS;
 }
 
 static DAQ_State rswitch_daq_check_status(void* handle)
 {
-	struct rswitch_impl *impl = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	return impl->state;
+	return context->state;
 }
 
 static int rswitch_daq_get_stats(void* handle, DAQ_Stats_t* stats)
@@ -1751,15 +1744,15 @@ static int rswitch_daq_get_datalink_type(void *handle)
 
 static const char* rswitch_daq_get_errbuf(void* handle)
 {
-	struct rswitch_impl *impl = (struct rswitch_impl *)handle;
+	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	return impl->error;
+	return context->error;
 }
 
 static void rswitch_daq_set_errbuf(void* handle, const char* s)
 {
-	struct rswitch_impl *impl = (struct rswitch_impl *)handle;
-	DPE(impl->error, "%s", s ? s : "");
+	struct rswitch_context *context = (struct rswitch_context *)handle;
+	DPE(context->error, "%s", s ? s : "");
 }
 
 static int rswitch_daq_get_device_index(void* handle, const char* device)
