@@ -1708,6 +1708,8 @@ static int rswitch_daq_stop(void* handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
+	pcap_breakloop(context->handle);
+	pcap_close(context->handle);
 	context->state = DAQ_STATE_STOPPED;
 	return DAQ_SUCCESS;
 }
