@@ -73,6 +73,7 @@
 #define RTNL_SUPPRESS_NLMSG_DONE_NLERR (2)
 #define MAX_PREFS (1024)
 
+#define MONDEV_NAME	"rmon"
 #ifndef __aligned
 #define __aligned(x)		__attribute__((aligned(x)))
 #endif
@@ -164,6 +165,7 @@ struct rswitch_context {
 	DAQ_Analysis_Func_t analysis_func;
 
 	pcap_t *handle;
+	pcap_t *mon_handle;
 	int packets;
 	char *device;
 	int promisc_flag;
@@ -1252,7 +1254,7 @@ static unsigned ll_name_to_index(const char *name)
 	return idx;
 }
 
-static int pcap_daq_open(struct rswitch_context *context)
+static int pcap_daq_open(struct rswitch_context *context, const char *device, pcap_t **handle)
 {
 	uint32_t localnet, netmask;
 	uint32_t defaultnet = 0xFFFFFF00;
@@ -1260,31 +1262,31 @@ static int pcap_daq_open(struct rswitch_context *context)
 	int status;
 #endif /* PCAP_OLDSTYLE */
 
-	if (context->handle)
+	if (*handle)
 		return DAQ_SUCCESS;
 
 	if (context->device) {
 #ifndef PCAP_OLDSTYLE
-		context->handle = pcap_create(context->device, context->error);
-		if (!context->handle)
+		*handle = pcap_create(device, context->error);
+		if (!*handle)
 			return DAQ_ERROR;
-		if ((status = pcap_set_snaplen(context->handle, context->snaplen)) < 0)
+		if ((status = pcap_set_snaplen(*handle, context->snaplen)) < 0)
 			goto fail;
-		if ((status = pcap_set_promisc(context->handle, context->promisc_flag ? 1 : 0)) < 0)
+		if ((status = pcap_set_promisc(*handle, context->promisc_flag ? 1 : 0)) < 0)
 			goto fail;
-		if ((status = pcap_set_timeout(context->handle, context->timeout)) < 0)
+		if ((status = pcap_set_timeout(*handle, context->timeout)) < 0)
 			goto fail;
-		if ((status = pcap_set_buffer_size(context->handle, context->buffer_size)) < 0)
+		if ((status = pcap_set_buffer_size(*handle, context->buffer_size)) < 0)
 			goto fail;
-		if ((status = pcap_activate(context->handle)) < 0)
+		if ((status = pcap_activate(*handle)) < 0)
 			goto fail;
 #else
-		context->handle = pcap_open_live(context->device, context->snaplen,
+		*handle = pcap_open_live(device, context->snaplen,
 										 context->promisc_flag ? 1 : 0, context->timeout, context->error);
-		if (!context->handle)
+		if (!*handle)
 			return DAQ_ERROR;
 #endif /* PCAP_OLDSTYLE */
-		if (pcap_lookupnet(context->device, &localnet, &netmask, context->error) < 0)
+		if (pcap_lookupnet(device, &localnet, &netmask, context->error) < 0)
 			netmask = htonl(defaultnet);
 	}
 	context->netmask = htonl(defaultnet);
@@ -1294,11 +1296,11 @@ static int pcap_daq_open(struct rswitch_context *context)
 #ifndef PCAP_OLDSTYLE
 fail:
 	if (status == PCAP_ERROR || status == PCAP_ERROR_NO_SUCH_DEVICE || status == PCAP_ERROR_PERM_DENIED)
-		DPE(context->error, "%s", pcap_geterr(context->handle));
+		DPE(context->error, "%s", pcap_geterr(*handle));
 	else
 		DPE(context->error, "%s: %s", context->device, pcap_statustostr(status));
-	pcap_close(context->handle);
-	context->handle = NULL;
+	pcap_close(*handle);
+	*handle = NULL;
 	return DAQ_ERROR;
 #endif /* PCAP_OLDSTYLE */
 }
@@ -1326,7 +1328,13 @@ static int rswitch_daq_initialize(
 	context->timeout = cfg->timeout;
 	INIT_LIST_HEAD(&context->blacklist);
 
-	if (pcap_daq_open(context) != DAQ_SUCCESS) {
+	if (pcap_daq_open(context, MONDEV_NAME, &context->mon_handle) != DAQ_SUCCESS) {
+		snprintf(errBuf, errMax, "%s", context->error);
+		free(context);
+		return DAQ_ERROR;
+	}
+
+	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS) {
 		snprintf(errBuf, errMax, "%s", context->error);
 		free(context);
 		return DAQ_ERROR;
@@ -1668,6 +1676,12 @@ static int rswitch_daq_acquire(
 			DPE(context->error, "%s", pcap_geterr(context->handle));
 			return ret;
 		}
+		ret = pcap_dispatch(
+			context->mon_handle, (cnt <= 0) ? -1 : cnt - context->packets, pcap_process_loop, (void *)context);
+		if (ret == -1) {
+			DPE(context->error, "%s", pcap_geterr(context->mon_handle));
+			return ret;
+		}
 		/* If we hit a breakloop call or timed out without reading any packets, break out. */
 		else if (ret == -2 || ret == 0)
 			break;
@@ -1692,7 +1706,7 @@ static int rswitch_daq_start(void* handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	if (pcap_daq_open(context) != DAQ_SUCCESS)
+	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS)
 		return DAQ_ERROR;
 
 	context->state = DAQ_STATE_STARTED;
@@ -1709,7 +1723,9 @@ static int rswitch_daq_stop(void* handle)
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
 	pcap_breakloop(context->handle);
+	pcap_breakloop(context->mon_handle);
 	pcap_close(context->handle);
+	pcap_close(context->mon_handle);
 	context->state = DAQ_STATE_STOPPED;
 	return DAQ_SUCCESS;
 }
