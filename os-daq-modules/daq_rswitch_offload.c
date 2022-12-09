@@ -72,6 +72,8 @@
 #define RTNL_SUPPRESS_NLMSG_ERROR_NLERR	(4)
 #define RTNL_SUPPRESS_NLMSG_DONE_NLERR (2)
 #define MAX_PREFS (1024)
+#define POLL_TIME_USEC (1000000)
+#define ENTRY_TIMEOUT_SEC (20)
 
 #define MONDEV_NAME	"rmon"
 #ifndef __aligned
@@ -152,6 +154,7 @@ struct blacklist_data {
 	uint32_t dst_ip;
 	uint32_t src_ip;
 	uint32_t pref;
+	time_t expired_time;
 	uint8_t proto;
 	struct list_head list;
 };
@@ -174,6 +177,8 @@ struct rswitch_context {
 	u_char *user_data;
 	uint32_t netmask;
 	struct list_head blacklist;
+	pthread_t cleanup_thread;
+	pthread_mutex_t lock;
 };
 
 struct rtnl_handle {
@@ -1305,6 +1310,56 @@ fail:
 #endif /* PCAP_OLDSTYLE */
 }
 
+static void remove_drop_action(struct rswitch_context *context, uint32_t pref)
+{
+	struct {
+		struct nlmsghdr	n;
+		struct tcmsg	t;
+		char			buf[MAX_MSG];
+	} req = {
+		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
+		.n.nlmsg_flags = NLM_F_REQUEST,
+		.n.nlmsg_type = RTM_DELTFILTER,
+		.t.tcm_family = AF_UNSPEC,
+		.t.tcm_parent = 0xfffffff2,
+	};
+
+	req.t.tcm_info = ((pref) << 16);
+	req.t.tcm_ifindex = ll_name_to_index(context->device);
+
+	if (rtnl_talk(&rth, &req.n, NULL) < 0) {
+		fprintf(stderr, "We have an error talking to the kernel\n");
+		return;
+	}
+}
+
+static void remove_expired_entries(struct rswitch_context *context)
+{
+	struct blacklist_data *pos, *tmp;
+	time_t curr_time = time(NULL);
+
+	pthread_mutex_lock(&context->lock);
+	list_for_each_entry_safe(pos, tmp, &context->blacklist, list) {
+		if (curr_time >= pos->expired_time) {
+			remove_drop_action(context, pos->pref);
+			list_del(&pos->list);
+			free(pos);
+		}
+	}
+	pthread_mutex_unlock(&context->lock);
+}
+
+static void *cleanup_thread(void *ptr)
+{
+	struct rswitch_context *context = (struct rswitch_context *)ptr;
+
+	while (true) {
+		/* Sleep for POLL_TIME_USEC */
+		usleep(POLL_TIME_USEC);
+		remove_expired_entries(context);
+	}
+}
+
 static int rswitch_daq_initialize(
 	const DAQ_Config_t *cfg, void **handle, char *errBuf, size_t errMax)
 {
@@ -1346,6 +1401,18 @@ static int rswitch_daq_initialize(
 		return DAQ_ERROR;
 	}
 
+	if (pthread_mutex_init(&context->lock, NULL) != 0) {
+		fprintf(stderr, "Mutex init has failed\n");
+		free(context);
+		return DAQ_ERROR;
+	}
+
+	if (pthread_create(&context->cleanup_thread, NULL, cleanup_thread, context)) {
+		fprintf(stderr, "Thread create has failed\n");
+		free(context);
+		return DAQ_ERROR;
+	}
+
 	context->state = DAQ_STATE_INITIALIZED;
 
 	*handle = context;
@@ -1353,39 +1420,21 @@ static int rswitch_daq_initialize(
 	return DAQ_SUCCESS;
 }
 
-static void remove_drop_action(struct rswitch_context *context, uint32_t pref)
-{
-	struct {
-		struct nlmsghdr	n;
-		struct tcmsg	t;
-		char			buf[MAX_MSG];
-	} req = {
-		.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg)),
-		.n.nlmsg_flags = NLM_F_REQUEST,
-		.n.nlmsg_type = RTM_DELTFILTER,
-		.t.tcm_family = AF_UNSPEC,
-		.t.tcm_parent = 0xfffffff2,
-	};
-
-	req.t.tcm_info = ((pref) << 16);
-	req.t.tcm_ifindex = ll_name_to_index(context->device);
-
-	if (rtnl_talk(&rth, &req.n, NULL) < 0) {
-		fprintf(stderr, "We have an error talking to the kernel\n");
-		return;
-	}
-}
-
 static void rswitch_daq_shutdown(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	struct blacklist_data *pos, *tmp;
 
+	pthread_mutex_lock(&context->lock);
 	list_for_each_entry_safe(pos, tmp, &context->blacklist, list) {
 		remove_drop_action(context, pos->pref);
 		list_del(&pos->list);
 		free(pos);
 	}
+	pthread_mutex_unlock(&context->lock);
+
+	pthread_cancel(context->cleanup_thread);
+	pthread_join(context->cleanup_thread, NULL);
 }
 
 static void add_drop_action(struct nlmsghdr	*n)
@@ -1410,13 +1459,17 @@ static bool is_already_blacklisted(struct ip_v4_hdr *ip_hdr, struct rswitch_cont
 {
 	struct blacklist_data *pos;
 
+	pthread_mutex_lock(&context->lock);
 	list_for_each_entry(pos, &context->blacklist, list) {
 		if (pos->dst_ip == ip_hdr->ip_dst &&
 			pos->src_ip == ip_hdr->ip_src &&
 			pos->proto == ip_hdr->ip_proto) {
+				pthread_mutex_unlock(&context->lock);
 				return true;
 			}
 	}
+
+	pthread_mutex_unlock(&context->lock);
 
 	return false;
 }
@@ -1566,6 +1619,7 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *
 	} sel = {};
 	uint32_t flags = TCA_CLS_FLAGS_SKIP_SW;
 	struct blacklist_data *blacklist_entry;
+	time_t curr_time = time(NULL);
 
 	prefs_after.num = 0;
 	prefs_before.num = 0;
@@ -1585,6 +1639,8 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *
 		fprintf(stderr, "Failed to allocate memory for blacklist entry\n");
 		return;
 	}
+
+	blacklist_entry->expired_time = curr_time + ENTRY_TIMEOUT_SEC;
 
 	req.t.tcm_ifindex = ll_name_to_index(context->device);
 	if (req.t.tcm_ifindex == 0) {
@@ -1628,7 +1684,9 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *
 	blacklist_entry->dst_ip = ip_hdr->ip_dst;
 	blacklist_entry->src_ip = ip_hdr->ip_src;
 	blacklist_entry->proto = ip_hdr->ip_proto;
+	pthread_mutex_lock(&context->lock);
 	list_add(&blacklist_entry->list, &context->blacklist);
+	pthread_mutex_unlock(&context->lock);
 }
 
 static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, const u_char *data)
