@@ -1306,9 +1306,9 @@ fail:
 }
 
 static int rswitch_daq_initialize(
-	const DAQ_Config_t* cfg, void** handle, char* errBuf, size_t errMax)
+	const DAQ_Config_t *cfg, void **handle, char *errBuf, size_t errMax)
 {
-	struct rswitch_context* context = calloc(1, sizeof(*context));
+	struct rswitch_context *context = calloc(1, sizeof(*context));
 
 	if (!context) {
 		snprintf(errBuf, errMax, "%s: failed to allocate the R-Switch context!",
@@ -1660,7 +1660,7 @@ static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, cons
 }
 
 static int rswitch_daq_acquire(
-	void* handle, int cnt, DAQ_Analysis_Func_t callback, DAQ_Meta_Func_t metaback, void* user)
+	void *handle, int cnt, DAQ_Analysis_Func_t callback, DAQ_Meta_Func_t metaback, void *user)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	int ret;
@@ -1691,34 +1691,39 @@ static int rswitch_daq_acquire(
 }
 
 static int rswitch_daq_inject(
-	void* handle, const DAQ_PktHdr_t* hdr, const uint8_t* buf, uint32_t len,
+	void *handle, const DAQ_PktHdr_t *hdr, const uint8_t *buf, uint32_t len,
 	int reverse)
 {
 	return DAQ_SUCCESS;
 }
 
-static int rswitch_daq_set_filter(void* handle, const char* filter)
+static int rswitch_daq_set_filter(void *handle, const char *filter)
 {
 	return DAQ_SUCCESS;
 }
 
-static int rswitch_daq_start(void* handle)
+static int rswitch_daq_start(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS)
+	if (pcap_daq_open(context, MONDEV_NAME, &context->mon_handle) != DAQ_SUCCESS)
 		return DAQ_ERROR;
+
+	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS) {
+		pcap_close(context->mon_handle);
+		return DAQ_ERROR;
+	}
 
 	context->state = DAQ_STATE_STARTED;
 	return DAQ_SUCCESS;
 }
 
-static int rswitch_daq_breakloop(void* handle)
+static int rswitch_daq_breakloop(void *handle)
 {
 	return DAQ_SUCCESS;
 }
 
-static int rswitch_daq_stop(void* handle)
+static int rswitch_daq_stop(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
@@ -1730,26 +1735,26 @@ static int rswitch_daq_stop(void* handle)
 	return DAQ_SUCCESS;
 }
 
-static DAQ_State rswitch_daq_check_status(void* handle)
+static DAQ_State rswitch_daq_check_status(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
 	return context->state;
 }
 
-static int rswitch_daq_get_stats(void* handle, DAQ_Stats_t* stats)
+static int rswitch_daq_get_stats(void *handle, DAQ_Stats_t *stats)
 {
 	return DAQ_SUCCESS;
 }
 
-static void rswitch_daq_reset_stats(void* handle) { }
+static void rswitch_daq_reset_stats(void *handle) { }
 
-static int rswitch_daq_get_snaplen (void* handle)
+static int rswitch_daq_get_snaplen (void *handle)
 {
 	return 0;
 }
 
-static uint32_t rswitch_daq_get_capabilities(void* handle)
+static uint32_t rswitch_daq_get_capabilities(void *handle)
 {
 	return DAQ_CAPA_BLOCK | DAQ_CAPA_BREAKLOOP |
 		DAQ_CAPA_UNPRIV_START | DAQ_CAPA_BLACKLIST;
@@ -1760,20 +1765,20 @@ static int rswitch_daq_get_datalink_type(void *handle)
 	return DLT_EN10MB;
 }
 
-static const char* rswitch_daq_get_errbuf(void* handle)
+static const char *rswitch_daq_get_errbuf(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
 	return context->error;
 }
 
-static void rswitch_daq_set_errbuf(void* handle, const char* s)
+static void rswitch_daq_set_errbuf(void *handle, const char *s)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	DPE(context->error, "%s", s ? s : "");
 }
 
-static int rswitch_daq_get_device_index(void* handle, const char* device)
+static int rswitch_daq_get_device_index(void *handle, const char *device)
 {
 	return DAQ_ERROR_NOTSUP;
 }
