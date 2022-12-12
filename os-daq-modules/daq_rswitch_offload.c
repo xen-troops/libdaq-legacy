@@ -1381,8 +1381,11 @@ static void rswitch_daq_shutdown(void *handle)
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	struct blacklist_data *pos, *tmp;
 
-	list_for_each_entry_safe(pos, tmp, &context->blacklist, list)
+	list_for_each_entry_safe(pos, tmp, &context->blacklist, list) {
 		remove_drop_action(context, pos->pref);
+		list_del(&pos->list);
+		free(pos);
+	}
 }
 
 static void add_drop_action(struct nlmsghdr	*n)
