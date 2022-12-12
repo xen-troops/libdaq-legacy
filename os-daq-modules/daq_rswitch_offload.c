@@ -1706,8 +1706,13 @@ static int rswitch_daq_start(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 
-	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS)
+	if (pcap_daq_open(context, MONDEV_NAME, &context->mon_handle) != DAQ_SUCCESS)
 		return DAQ_ERROR;
+
+	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS) {
+		pcap_close(context->mon_handle);
+		return DAQ_ERROR;
+	}
 
 	context->state = DAQ_STATE_STARTED;
 	return DAQ_SUCCESS;
