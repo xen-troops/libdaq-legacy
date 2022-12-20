@@ -58,6 +58,7 @@
 #include <linux/nexthop.h>
 #include <stddef.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #define DAQ_MOD_VERSION  (1)
 #define DAQ_TYPE (DAQ_TYPE_INTF_CAPABLE | DAQ_TYPE_INLINE_CAPABLE | \
@@ -75,7 +76,6 @@
 #define POLL_TIME_USEC (1000000)
 #define ENTRY_TIMEOUT_SEC (20)
 
-#define MONDEV_NAME	"rmon"
 #ifndef __aligned
 #define __aligned(x)		__attribute__((aligned(x)))
 #endif
@@ -169,7 +169,9 @@ struct rswitch_context {
 
 	pcap_t *handle;
 	pcap_t *mon_handle;
+	pthread_t mon_thread;
 	int packets;
+	int cnt;
 	char *device;
 	int promisc_flag;
 	int timeout;
@@ -1363,7 +1365,8 @@ static void *cleanup_thread(void *ptr)
 static int rswitch_daq_initialize(
 	const DAQ_Config_t *cfg, void **handle, char *errBuf, size_t errMax)
 {
-	struct rswitch_context *context = calloc(1, sizeof(*context));
+	struct rswitch_context* context = calloc(1, sizeof(*context));
+	char *devname, *mondevname;
 
 	if (!context) {
 		snprintf(errBuf, errMax, "%s: failed to allocate the R-Switch context!",
@@ -1371,7 +1374,17 @@ static int rswitch_daq_initialize(
 		return DAQ_ERROR_NOMEM;
 	}
 
-	context->device = strdup(cfg->name);
+	devname = strtok(cfg->name, ":");
+	mondevname = strtok(NULL, ":");
+
+	if (!devname || !mondevname) {
+		snprintf(errBuf, errMax, "%s: failed to parse device name!",
+			__func__);
+		free(context);
+		return DAQ_ERROR;
+	}
+
+	context->device = strdup(devname);
 	if (!context->device) {
 		snprintf(errBuf, errMax, "%s: Couldn't allocate memory for the device string!", __func__);
 		free(context);
@@ -1383,7 +1396,7 @@ static int rswitch_daq_initialize(
 	context->timeout = cfg->timeout;
 	INIT_LIST_HEAD(&context->blacklist);
 
-	if (pcap_daq_open(context, MONDEV_NAME, &context->mon_handle) != DAQ_SUCCESS) {
+	if (pcap_daq_open(context, mondevname, &context->mon_handle) != DAQ_SUCCESS) {
 		snprintf(errBuf, errMax, "%s", context->error);
 		free(context);
 		return DAQ_ERROR;
@@ -1424,14 +1437,6 @@ static void rswitch_daq_shutdown(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	struct blacklist_data *pos, *tmp;
-
-	pthread_mutex_lock(&context->lock);
-	list_for_each_entry_safe(pos, tmp, &context->blacklist, list) {
-		remove_drop_action(context, pos->pref);
-		list_del(&pos->list);
-		free(pos);
-	}
-	pthread_mutex_unlock(&context->lock);
 
 	pthread_cancel(context->cleanup_thread);
 	pthread_join(context->cleanup_thread, NULL);
@@ -1720,6 +1725,26 @@ static void pcap_process_loop(u_char *user, const struct pcap_pkthdr *pkth, cons
 	context->stats.verdicts[verdict]++;
 }
 
+static void *rswitch_daq_acquire_mon(void* handle)
+{
+	struct rswitch_context *context = (struct rswitch_context *)handle;
+	int ret;
+
+	while (context->packets < context->cnt || context->cnt <= 0) {
+		ret = pcap_dispatch(
+			context->mon_handle, (context->cnt <= 0) ? -1 : context->cnt - context->packets, pcap_process_loop, (void *)context);
+		if (ret == -1) {
+			DPE(context->error, "%s", pcap_geterr(context->mon_handle));
+			return 0;
+		}
+		/* If we hit a breakloop call or timed out without reading any packets, break out. */
+		else if (ret == -2 || ret == 0)
+			break;
+	}
+
+	return 0;
+}
+
 static int rswitch_daq_acquire(
 	void *handle, int cnt, DAQ_Analysis_Func_t callback, DAQ_Meta_Func_t metaback, void *user)
 {
@@ -1730,6 +1755,10 @@ static int rswitch_daq_acquire(
 	context->user_data = user;
 
 	context->packets = 0;
+	context->cnt = cnt;
+
+	pthread_create(&context->mon_thread, NULL, rswitch_daq_acquire_mon, handle);
+
 	while (context->packets < cnt || cnt <= 0) {
 		ret = pcap_dispatch(
 			context->handle, (cnt <= 0) ? -1 : cnt - context->packets, pcap_process_loop, (void *)context);
@@ -1737,17 +1766,12 @@ static int rswitch_daq_acquire(
 			DPE(context->error, "%s", pcap_geterr(context->handle));
 			return ret;
 		}
-		ret = pcap_dispatch(
-			context->mon_handle, (cnt <= 0) ? -1 : cnt - context->packets, pcap_process_loop, (void *)context);
-		if (ret == -1) {
-			DPE(context->error, "%s", pcap_geterr(context->mon_handle));
-			return ret;
-		}
 		/* If we hit a breakloop call or timed out without reading any packets, break out. */
 		else if (ret == -2 || ret == 0)
 			break;
 	}
 
+	pthread_cancel(context->mon_thread);
 	return 0;
 }
 
@@ -1766,15 +1790,6 @@ static int rswitch_daq_set_filter(void *handle, const char *filter)
 static int rswitch_daq_start(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
-
-	if (pcap_daq_open(context, MONDEV_NAME, &context->mon_handle) != DAQ_SUCCESS)
-		return DAQ_ERROR;
-
-	if (pcap_daq_open(context, context->device, &context->handle) != DAQ_SUCCESS) {
-		pcap_close(context->mon_handle);
-		return DAQ_ERROR;
-	}
-
 	context->state = DAQ_STATE_STARTED;
 	return DAQ_SUCCESS;
 }
@@ -1787,11 +1802,19 @@ static int rswitch_daq_breakloop(void *handle)
 static int rswitch_daq_stop(void *handle)
 {
 	struct rswitch_context *context = (struct rswitch_context *)handle;
+	struct blacklist_data *pos, *tmp;
 
 	pcap_breakloop(context->handle);
 	pcap_breakloop(context->mon_handle);
 	pcap_close(context->handle);
 	pcap_close(context->mon_handle);
+	pthread_mutex_lock(&context->lock);
+	list_for_each_entry_safe(pos, tmp, &context->blacklist, list) {
+		remove_drop_action(context, pos->pref);
+		list_del(&pos->list);
+		free(pos);
+	}
+	pthread_mutex_unlock(&context->lock);
 	context->state = DAQ_STATE_STOPPED;
 	return DAQ_SUCCESS;
 }
