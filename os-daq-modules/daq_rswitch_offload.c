@@ -1796,6 +1796,9 @@ static int rswitch_daq_start(void *handle)
 
 static int rswitch_daq_breakloop(void *handle)
 {
+	struct rswitch_context *context = (struct rswitch_context *)handle;
+	pcap_breakloop(context->handle);
+	pcap_breakloop(context->mon_handle);
 	return DAQ_SUCCESS;
 }
 
@@ -1804,8 +1807,6 @@ static int rswitch_daq_stop(void *handle)
 	struct rswitch_context *context = (struct rswitch_context *)handle;
 	struct blacklist_data *pos, *tmp;
 
-	pcap_breakloop(context->handle);
-	pcap_breakloop(context->mon_handle);
 	pcap_close(context->handle);
 	pcap_close(context->mon_handle);
 	pthread_mutex_lock(&context->lock);
