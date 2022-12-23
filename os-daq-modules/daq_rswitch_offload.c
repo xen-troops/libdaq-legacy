@@ -76,6 +76,9 @@
 #define POLL_TIME_USEC (1000000)
 #define ENTRY_TIMEOUT_SEC (20)
 
+#define PROTO_TCP 6
+#define PROTO_UDP 17
+
 #ifndef __aligned
 #define __aligned(x)		__attribute__((aligned(x)))
 #endif
@@ -142,6 +145,25 @@ struct __attribute__((__packed__)) ip_v4_hdr {
 	uint16_t ip_csum;	  /* checksum */
 	uint32_t ip_src;  /* source IP */
 	uint32_t ip_dst;  /* dest IP */
+};
+
+struct __attribute__((packed)) tcphdr {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint32_t seq;
+	uint32_t ack;
+	uint8_t  data_offset;  // 4 bits
+	uint8_t  flags;
+	uint16_t window_size;
+	uint16_t checksum;
+	uint16_t urgent_p;
+};
+
+struct __attribute__((packed)) udphdr {
+	uint16_t src_port;                /* source port */
+	uint16_t dst_port;                /* destination port */
+	uint16_t uh_ulen;                /* udp length */
+	uint16_t uh_sum;                /* udp checksum */
 };
 
 struct list_head;
@@ -1665,6 +1687,23 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *
 	pack_key8(&sel.sel, ip_hdr->ip_proto, 0xff, 9, 0);
 	pack_key32(&sel.sel, ip_hdr->ip_src, 0xffffffff, 12, 0);
 	pack_key32(&sel.sel, ip_hdr->ip_dst, 0xffffffff, 16, 0);
+
+	if (ip_hdr->ip_proto == PROTO_TCP) {
+		uint8_t *data = ip_hdr;
+		struct tcphdr * tcphdr;
+		uint8_t ihl = (ip_hdr->ip_verhl & 0x0f);
+		
+		tcphdr = (struct tcphdr *)(data + ihl * 4 + sizeof(struct ether_hdr)); // IP header length + Ethernet header length
+		pack_key32(&sel.sel, ((uint32_t)tcphdr->dst_port) << 16,  0xffff0000, 20, 0);
+	}
+	if (ip_hdr->ip_proto == PROTO_UDP) {
+		uint8_t *data = ip_hdr;
+		struct udphdr * udphdr;
+		uint8_t ihl = (ip_hdr->ip_verhl & 0x0f);
+		
+		udphdr = (struct udphdr *)(data + ihl * 4 + sizeof(struct ether_hdr)); // IP header length + Ethernet header length
+		pack_key32(&sel.sel, ((uint32_t)udphdr->dst_port) << 16,  0xffff0000, 20, 0);
+	}
 
 	addattr_l(&req.n, MAX_MSG, TCA_U32_SEL, &sel,
 			  sizeof(sel.sel) +
