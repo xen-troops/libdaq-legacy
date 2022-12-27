@@ -76,6 +76,9 @@
 #define POLL_TIME_USEC (1000000)
 #define ENTRY_TIMEOUT_SEC (20)
 
+#define RSWITCH_LIBDAQ_CONF_PATH "/etc/snort/rswitch.conf"
+#define RSWITCH_EXP_TIME_DELIM "blacklist_expired_timeout: "
+
 #define PROTO_TCP 6
 #define PROTO_UDP 17
 
@@ -203,6 +206,7 @@ struct rswitch_context {
 	struct list_head blacklist;
 	pthread_t cleanup_thread;
 	pthread_mutex_t lock;
+	uint32_t expired_time;
 };
 
 struct rtnl_handle {
@@ -1384,6 +1388,35 @@ static void *cleanup_thread(void *ptr)
 	}
 }
 
+static void get_expired_timeout(struct rswitch_context* context)
+{
+	int sz;
+	int fd1 = open(RSWITCH_LIBDAQ_CONF_PATH, O_RDONLY);
+	char cfg[1024] = {0};
+	char *ptr;
+
+	if (fd1 < 0) {
+		context->expired_time = ENTRY_TIMEOUT_SEC;
+		return;
+	}
+
+	sz = read(fd1, cfg, 1024);
+	if (sz < strlen(RSWITCH_EXP_TIME_DELIM)) {
+		context->expired_time = ENTRY_TIMEOUT_SEC;
+		return;
+	}
+
+	ptr = strstr(cfg, RSWITCH_EXP_TIME_DELIM);
+	if (!ptr) {
+		context->expired_time = ENTRY_TIMEOUT_SEC;
+	} else {
+		ptr += strlen(RSWITCH_EXP_TIME_DELIM);
+		context->expired_time = atoi(ptr);
+		if (!context->expired_time)
+			context->expired_time = ENTRY_TIMEOUT_SEC;
+	}
+}
+
 static int rswitch_daq_initialize(
 	const DAQ_Config_t *cfg, void **handle, char *errBuf, size_t errMax)
 {
@@ -1395,6 +1428,8 @@ static int rswitch_daq_initialize(
 			__func__);
 		return DAQ_ERROR_NOMEM;
 	}
+
+	get_expired_timeout(context);
 
 	devname = strtok(cfg->name, ":");
 	mondevname = strtok(NULL, ":");
@@ -1667,7 +1702,7 @@ static void blacklist_traffic(struct ip_v4_hdr *ip_hdr, struct rswitch_context *
 		return;
 	}
 
-	blacklist_entry->expired_time = curr_time + ENTRY_TIMEOUT_SEC;
+	blacklist_entry->expired_time = curr_time + context->expired_time;
 
 	req.t.tcm_ifindex = ll_name_to_index(context->device);
 	if (req.t.tcm_ifindex == 0) {
